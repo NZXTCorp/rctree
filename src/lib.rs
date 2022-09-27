@@ -40,7 +40,7 @@ Weak references to destroyed nodes are treated as if they were not set at all.
 (E.g. a node can become a root when its parent is destroyed.)
 
 Since nodes are *aliased* (have multiple references to them),
-[`RefCell`](http://doc.rust-lang.org/std/cell/index.html) is used for interior mutability.
+[`RwLock`](http://doc.rust-lang.org/std/cell/index.html) is used for interior mutability.
 
 Advantages:
 
@@ -62,25 +62,65 @@ Disadvantages:
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::fmt;
-use std::cell::{RefCell, Ref, RefMut};
-use std::rc::{Rc, Weak};
+use std::fmt::{self, Debug};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Weak, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-type Link<T> = Rc<RefCell<NodeData<T>>>;
-type WeakLink<T> = Weak<RefCell<NodeData<T>>>;
+type Link<T> = Arc<RwLock<NodeData<T>>>;
+type WeakLink<T> = Weak<RwLock<NodeData<T>>>;
+
+/// Holds a mutex read guard and provides access to the underlying data
+pub struct Borrow<'a, T: 'static>(RwLockReadGuard<'a, NodeData<T>>);
+
+impl<'a, T> Deref for Borrow<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.data
+    }
+}
+
+impl<'a, T: Debug> Debug for Borrow<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.data.fmt(f)
+    }
+}
+
+/// Holds a mutex write guard and provides access to the underlying data
+pub struct BorrowMut<'a, T: 'static>(RwLockWriteGuard<'a, NodeData<T>>);
+
+impl<'a, T> Deref for BorrowMut<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.data
+    }
+}
+
+impl<'a, T> DerefMut for BorrowMut<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0.data
+    }
+}
+
+impl<'a, T: Debug> Debug for BorrowMut<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.data.fmt(f)
+    }
+}
 
 /// A reference to a node holding a value of type `T`. Nodes form a tree.
 ///
 /// Internally, this uses reference counting for lifetime tracking
-/// and `std::cell::RefCell` for interior mutability.
+/// and `std::cell::RwLock` for interior mutability.
 ///
 /// **Note:** Cloning a `Node` only increments a reference count. It does not copy the data.
-pub struct Node<T>(Link<T>);
+pub struct Node<T: 'static>(Link<T>);
 
 /// A weak reference to a node holding a value of type `T`.
-pub struct WeakNode<T>(WeakLink<T>);
+pub struct WeakNode<T: 'static>(WeakLink<T>);
 
-struct NodeData<T> {
+struct NodeData<T: 'static> {
     parent: Option<WeakLink<T>>,
     first_child: Option<Link<T>>,
     last_child: Option<WeakLink<T>>,
@@ -92,33 +132,33 @@ struct NodeData<T> {
 /// Cloning a `Node` only increments a reference count. It does not copy the data.
 impl<T> Clone for Node<T> {
     fn clone(&self) -> Self {
-        Node(Rc::clone(&self.0))
+        Node(Arc::clone(&self.0))
     }
 }
 
 impl<T> PartialEq for Node<T> {
     fn eq(&self, other: &Node<T>) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Node<T> {
+impl<T: 'static + fmt::Debug> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&*self.borrow(), f)
     }
 }
 
-impl<T: fmt::Display> fmt::Display for Node<T> {
+impl<T: 'static + fmt::Display> fmt::Display for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(&*self.borrow(), f)
     }
 }
 
 
-impl<T> Node<T> {
+impl<T: 'static> Node<T> {
     /// Creates a new node from its associated data.
     pub fn new(data: T) -> Node<T> {
-        Node(Rc::new(RefCell::new(NodeData {
+        Node(Arc::new(RwLock::new(NodeData {
             parent: None,
             first_child: None,
             last_child: None,
@@ -130,7 +170,7 @@ impl<T> Node<T> {
 
     /// Returns a weak referece to a node.
     pub fn downgrade(&self) -> WeakNode<T> {
-        WeakNode(Rc::downgrade(&self.0))
+        WeakNode(Arc::downgrade(&self.0))
     }
 
     /// Returns a parent node, unless this node is the root of the tree.
@@ -139,7 +179,7 @@ impl<T> Node<T> {
     ///
     /// Panics if the node is currently mutably borrowed.
     pub fn parent(&self) -> Option<Node<T>> {
-        Some(Node(self.0.borrow().parent.as_ref()?.upgrade()?))
+        Some(Node(self.0.read().unwrap().parent.as_ref()?.upgrade()?))
     }
 
     /// Returns a first child of this node, unless it has no child.
@@ -148,7 +188,7 @@ impl<T> Node<T> {
     ///
     /// Panics if the node is currently mutably borrowed.
     pub fn first_child(&self) -> Option<Node<T>> {
-        Some(Node(self.0.borrow().first_child.as_ref()?.clone()))
+        Some(Node(self.0.read().unwrap().first_child.as_ref()?.clone()))
     }
 
     /// Returns a last child of this node, unless it has no child.
@@ -157,7 +197,7 @@ impl<T> Node<T> {
     ///
     /// Panics if the node is currently mutably borrowed.
     pub fn last_child(&self) -> Option<Node<T>> {
-        Some(Node(self.0.borrow().last_child.as_ref()?.upgrade()?))
+        Some(Node(self.0.read().unwrap().last_child.as_ref()?.upgrade()?))
     }
 
     /// Returns the previous sibling of this node, unless it is a first child.
@@ -166,7 +206,7 @@ impl<T> Node<T> {
     ///
     /// Panics if the node is currently mutably borrowed.
     pub fn previous_sibling(&self) -> Option<Node<T>> {
-        Some(Node(self.0.borrow().previous_sibling.as_ref()?.upgrade()?))
+        Some(Node(self.0.read().unwrap().previous_sibling.as_ref()?.upgrade()?))
     }
 
     /// Returns the next sibling of this node, unless it is a last child.
@@ -175,7 +215,7 @@ impl<T> Node<T> {
     ///
     /// Panics if the node is currently mutably borrowed.
     pub fn next_sibling(&self) -> Option<Node<T>> {
-        Some(Node(self.0.borrow().next_sibling.as_ref()?.clone()))
+        Some(Node(self.0.read().unwrap().next_sibling.as_ref()?.clone()))
     }
 
     /// Returns a shared reference to this node's data
@@ -183,8 +223,8 @@ impl<T> Node<T> {
     /// # Panics
     ///
     /// Panics if the node is currently mutably borrowed.
-    pub fn borrow(&self) -> Ref<T> {
-        Ref::map(self.0.borrow(), |v| &v.data)
+    pub fn borrow(&self) ->  Borrow<T> {
+        Borrow(self.0.read().unwrap())
     }
 
     /// Returns a unique/mutable reference to this node's data
@@ -192,8 +232,8 @@ impl<T> Node<T> {
     /// # Panics
     ///
     /// Panics if the node is currently borrowed.
-    pub fn borrow_mut(&mut self) -> RefMut<T> {
-        RefMut::map(self.0.borrow_mut(), |v| &mut v.data)
+    pub fn borrow_mut(&mut self) -> BorrowMut<T> {
+        BorrowMut(self.0.write().unwrap())
     }
 
     /// Returns an iterator of nodes to this node and its ancestors.
@@ -260,7 +300,7 @@ impl<T> Node<T> {
     ///
     /// Panics if the node or one of its adjoining nodes is currently borrowed.
     pub fn detach(&mut self) {
-        self.0.borrow_mut().detach();
+        self.0.write().unwrap().detach();
     }
 
     /// Appends a new child to this node, after existing children.
@@ -271,23 +311,23 @@ impl<T> Node<T> {
     pub fn append(&mut self, new_child: Node<T>) {
         assert!(*self != new_child, "a node cannot be appended to itself");
 
-        let mut self_borrow = self.0.borrow_mut();
+        let mut self_borrow = self.0.write().unwrap();
         let mut last_child_opt = None;
         {
-            let mut new_child_borrow = new_child.0.borrow_mut();
+            let mut new_child_borrow = new_child.0.write().unwrap();
             new_child_borrow.detach();
-            new_child_borrow.parent = Some(Rc::downgrade(&self.0));
+            new_child_borrow.parent = Some(Arc::downgrade(&self.0));
             if let Some(last_child_weak) = self_borrow.last_child.take() {
                 if let Some(last_child_strong) = last_child_weak.upgrade() {
                     new_child_borrow.previous_sibling = Some(last_child_weak);
                     last_child_opt = Some(last_child_strong);
                 }
             }
-            self_borrow.last_child = Some(Rc::downgrade(&new_child.0));
+            self_borrow.last_child = Some(Arc::downgrade(&new_child.0));
         }
 
         if let Some(last_child_strong) = last_child_opt {
-            let mut last_child_borrow = last_child_strong.borrow_mut();
+            let mut last_child_borrow = last_child_strong.write().unwrap();
             debug_assert!(last_child_borrow.next_sibling.is_none());
             last_child_borrow.next_sibling = Some(new_child.0);
         } else {
@@ -305,23 +345,23 @@ impl<T> Node<T> {
     pub fn prepend(&mut self, new_child: Node<T>) {
         assert!(*self != new_child, "a node cannot be prepended to itself");
 
-        let mut self_borrow = self.0.borrow_mut();
+        let mut self_borrow = self.0.write().unwrap();
         {
-            let mut new_child_borrow = new_child.0.borrow_mut();
+            let mut new_child_borrow = new_child.0.write().unwrap();
             new_child_borrow.detach();
-            new_child_borrow.parent = Some(Rc::downgrade(&self.0));
+            new_child_borrow.parent = Some(Arc::downgrade(&self.0));
             match self_borrow.first_child.take() {
                 Some(first_child_strong) => {
                     {
-                        let mut first_child_borrow = first_child_strong.borrow_mut();
+                        let mut first_child_borrow = first_child_strong.write().unwrap();
                         debug_assert!(first_child_borrow.previous_sibling.is_none());
-                        first_child_borrow.previous_sibling = Some(Rc::downgrade(&new_child.0));
+                        first_child_borrow.previous_sibling = Some(Arc::downgrade(&new_child.0));
                     }
                     new_child_borrow.next_sibling = Some(first_child_strong);
                 }
                 None => {
                     debug_assert!(self_borrow.first_child.is_none());
-                    self_borrow.last_child = Some(Rc::downgrade(&new_child.0));
+                    self_borrow.last_child = Some(Arc::downgrade(&new_child.0));
                 }
             }
         }
@@ -336,29 +376,29 @@ impl<T> Node<T> {
     pub fn insert_after(&mut self, new_sibling: Node<T>) {
         assert!(*self != new_sibling, "a node cannot be inserted after itself");
 
-        let mut self_borrow = self.0.borrow_mut();
+        let mut self_borrow = self.0.write().unwrap();
         {
-            let mut new_sibling_borrow = new_sibling.0.borrow_mut();
+            let mut new_sibling_borrow = new_sibling.0.write().unwrap();
             new_sibling_borrow.detach();
             new_sibling_borrow.parent = self_borrow.parent.clone();
-            new_sibling_borrow.previous_sibling = Some(Rc::downgrade(&self.0));
+            new_sibling_borrow.previous_sibling = Some(Arc::downgrade(&self.0));
             match self_borrow.next_sibling.take() {
                 Some(next_sibling_strong) => {
                     {
-                        let mut next_sibling_borrow = next_sibling_strong.borrow_mut();
+                        let mut next_sibling_borrow = next_sibling_strong.write().unwrap();
                         debug_assert!({
                             let weak = next_sibling_borrow.previous_sibling.as_ref().unwrap();
-                            Rc::ptr_eq(&weak.upgrade().unwrap(), &self.0)
+                            Arc::ptr_eq(&weak.upgrade().unwrap(), &self.0)
                         });
-                        next_sibling_borrow.previous_sibling = Some(Rc::downgrade(&new_sibling.0));
+                        next_sibling_borrow.previous_sibling = Some(Arc::downgrade(&new_sibling.0));
                     }
                     new_sibling_borrow.next_sibling = Some(next_sibling_strong);
                 }
                 None => {
                     if let Some(parent_ref) = self_borrow.parent.as_ref() {
                         if let Some(parent_strong) = parent_ref.upgrade() {
-                            let mut parent_borrow = parent_strong.borrow_mut();
-                            parent_borrow.last_child = Some(Rc::downgrade(&new_sibling.0));
+                            let mut parent_borrow = parent_strong.write().unwrap();
+                            parent_borrow.last_child = Some(Arc::downgrade(&new_sibling.0));
                         }
                     }
                 }
@@ -375,10 +415,10 @@ impl<T> Node<T> {
     pub fn insert_before(&mut self, new_sibling: Node<T>) {
         assert!(*self != new_sibling, "a node cannot be inserted before itself");
 
-        let mut self_borrow = self.0.borrow_mut();
+        let mut self_borrow = self.0.write().unwrap();
         let mut previous_sibling_opt = None;
         {
-            let mut new_sibling_borrow = new_sibling.0.borrow_mut();
+            let mut new_sibling_borrow = new_sibling.0.write().unwrap();
             new_sibling_borrow.detach();
             new_sibling_borrow.parent = self_borrow.parent.clone();
             new_sibling_borrow.next_sibling = Some(self.0.clone());
@@ -388,21 +428,21 @@ impl<T> Node<T> {
                     previous_sibling_opt = Some(previous_sibling_strong);
                 }
             }
-            self_borrow.previous_sibling = Some(Rc::downgrade(&new_sibling.0));
+            self_borrow.previous_sibling = Some(Arc::downgrade(&new_sibling.0));
         }
 
         if let Some(previous_sibling_strong) = previous_sibling_opt {
-            let mut previous_sibling_borrow = previous_sibling_strong.borrow_mut();
+            let mut previous_sibling_borrow = previous_sibling_strong.write().unwrap();
             debug_assert!({
                 let rc = previous_sibling_borrow.next_sibling.as_ref().unwrap();
-                Rc::ptr_eq(rc, &self.0)
+                Arc::ptr_eq(rc, &self.0)
             });
             previous_sibling_borrow.next_sibling = Some(new_sibling.0);
         } else {
             // No previous sibling.
             if let Some(parent_ref) = self_borrow.parent.as_ref() {
                 if let Some(parent_strong) = parent_ref.upgrade() {
-                    let mut parent_borrow = parent_strong.borrow_mut();
+                    let mut parent_borrow = parent_strong.write().unwrap();
                     parent_borrow.first_child = Some(new_sibling.0);
                 }
             }
@@ -477,28 +517,28 @@ impl<T> NodeData<T> {
         let previous_sibling_opt = previous_sibling_weak.as_ref().and_then(|weak| weak.upgrade());
 
         if let Some(next_sibling_ref) = next_sibling_strong.as_ref() {
-            let mut next_sibling_borrow = next_sibling_ref.borrow_mut();
+            let mut next_sibling_borrow = next_sibling_ref.write().unwrap();
             next_sibling_borrow.previous_sibling = previous_sibling_weak;
         } else if let Some(parent_ref) = parent_weak.as_ref() {
             if let Some(parent_strong) = parent_ref.upgrade() {
-                let mut parent_borrow = parent_strong.borrow_mut();
+                let mut parent_borrow = parent_strong.write().unwrap();
                 parent_borrow.last_child = previous_sibling_weak;
             }
         }
 
         if let Some(previous_sibling_strong) = previous_sibling_opt {
-            let mut previous_sibling_borrow = previous_sibling_strong.borrow_mut();
+            let mut previous_sibling_borrow = previous_sibling_strong.write().unwrap();
             previous_sibling_borrow.next_sibling = next_sibling_strong;
         } else if let Some(parent_ref) = parent_weak.as_ref() {
             if let Some(parent_strong) = parent_ref.upgrade() {
-                let mut parent_borrow = parent_strong.borrow_mut();
+                let mut parent_borrow = parent_strong.write().unwrap();
                 parent_borrow.first_child = next_sibling_strong;
             }
         }
     }
 }
 
-impl<T> Drop for NodeData<T> {
+impl<T: 'static> Drop for NodeData<T> {
     fn drop(&mut self) {
         // Collect all descendant nodes and detach them to prevent the stack overflow.
 
@@ -553,19 +593,19 @@ macro_rules! impl_node_iterator {
 }
 
 /// An iterator of nodes to the ancestors a given node.
-pub struct Ancestors<T>(Option<Node<T>>);
+pub struct Ancestors<T: 'static>(Option<Node<T>>);
 impl_node_iterator!(Ancestors, |node: &Node<T>| node.parent());
 
 /// An iterator of nodes to the siblings before a given node.
-pub struct PrecedingSiblings<T>(Option<Node<T>>);
+pub struct PrecedingSiblings<T: 'static>(Option<Node<T>>);
 impl_node_iterator!(PrecedingSiblings, |node: &Node<T>| node.previous_sibling());
 
 /// An iterator of nodes to the siblings after a given node.
-pub struct FollowingSiblings<T>(Option<Node<T>>);
+pub struct FollowingSiblings<T: 'static>(Option<Node<T>>);
 impl_node_iterator!(FollowingSiblings, |node: &Node<T>| node.next_sibling());
 
 /// A double ended iterator of nodes to the children of a given node.
-pub struct Children<T> {
+pub struct Children<T: 'static> {
     next: Option<Node<T>>,
     next_back: Option<Node<T>>,
 }
@@ -621,9 +661,9 @@ impl<T> DoubleEndedIterator for Children<T> {
 }
 
 /// An iterator of nodes to a given node and its descendants, in tree order.
-pub struct Descendants<T>(Traverse<T>);
+pub struct Descendants<T: 'static>(Traverse<T>);
 
-impl<T> Iterator for Descendants<T> {
+impl<T: 'static> Iterator for Descendants<T> {
     type Item = Node<T>;
 
     /// # Panics
@@ -643,7 +683,7 @@ impl<T> Iterator for Descendants<T> {
 
 /// A node type during traverse.
 #[derive(Clone, Debug)]
-pub enum NodeEdge<T> {
+pub enum NodeEdge<T: 'static> {
     /// Indicates that start of a node that has children.
     /// Yielded by `Traverse::next` before the node's descendants.
     /// In HTML or XML, this corresponds to an opening tag like `<div>`
@@ -724,7 +764,7 @@ impl<T> NodeEdge<T> {
 
 /// A double ended iterator of nodes to a given node and its descendants,
 /// in tree order.
-pub struct Traverse<T> {
+pub struct Traverse<T: 'static> {
     root: Node<T>,
     next: Option<NodeEdge<T>>,
     next_back: Option<NodeEdge<T>>,
@@ -740,7 +780,7 @@ impl<T> Traverse<T> {
     }
 }
 
-impl<T> Iterator for Traverse<T> {
+impl<T: 'static> Iterator for Traverse<T> {
     type Item = NodeEdge<T>;
 
     /// # Panics

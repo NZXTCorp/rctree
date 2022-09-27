@@ -3,23 +3,24 @@ extern crate rctree;
 use rctree::{Node, NodeEdge};
 
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
 fn it_works() {
-    use std::cell;
 
-    struct DropTracker<'a>(&'a cell::Cell<u32>);
-    impl<'a> Drop for DropTracker<'a> {
+    struct DropTracker(Arc<AtomicUsize>);
+    impl Drop for DropTracker {
         fn drop(&mut self) {
-            self.0.set(self.0.get() + 1);
+            self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
 
     let mut new_counter = 0;
-    let drop_counter = cell::Cell::new(0);
+    let drop_counter = Arc::new(AtomicUsize::new(0));
     let mut new = || {
         new_counter += 1;
-        Node::new((new_counter, DropTracker(&drop_counter)))
+        Node::new((new_counter, DropTracker(Arc::clone(&drop_counter))))
     };
 
     {
@@ -36,9 +37,9 @@ fn it_works() {
         let c = new();  // 10
         b.append(c.clone());
 
-        assert_eq!(drop_counter.get(), 0);
+        assert_eq!(drop_counter.load(Ordering::SeqCst), 0);
         c.previous_sibling().unwrap().detach();
-        assert_eq!(drop_counter.get(), 1);
+        assert_eq!(drop_counter.load(Ordering::SeqCst), 1);
 
         assert_eq!(b.descendants().map(|node| {
             let borrow = node.borrow();
@@ -48,11 +49,11 @@ fn it_works() {
         ]);
     }
 
-    assert_eq!(drop_counter.get(), 10);
+    assert_eq!(drop_counter.load(Ordering::SeqCst), 10);
 }
 
 
-struct TreePrinter<T>(Node<T>);
+struct TreePrinter<T: 'static>(Node<T>);
 
 impl<T: fmt::Debug> fmt::Debug for TreePrinter<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

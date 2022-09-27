@@ -10,3 +10,7 @@ description = "A 'DOM-like' tree implemented using reference counting"
 repository = "https://github.com/RazrFalcon/rctree"
 documentation = "https://docs.rs/rctree/"
 readme = "README.md"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.21.1", features = ["full"] }
